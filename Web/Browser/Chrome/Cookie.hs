@@ -1,5 +1,8 @@
-{-# LANGUAGE NamedFieldPuns, RecordWildCards, ViewPatterns #-}
-{- -}
+{-# LANGUAGE NamedFieldPuns, RecordWildCards, ViewPatterns,OverloadedStrings #-}
+{-
+
+doctest --optghc=-XOverloadedStrings
+-}
 module Web.Browser.Chrome.Cookie (loadCookies) where
 
 import qualified Data.ByteString.UTF8 as U
@@ -23,7 +26,13 @@ pathToCookieDB :: FilePath -> FilePath
 pathToCookieDB profile = ".config" </> "google-chrome" </> profile </> "Cookies"
 --pathToCookieDB profile = "Local Settings" </> "Application Data" </> "Google" </> "Chrome" </> "User Data" </> profile </> "Cookies"
 
-{- from http-conduit -}
+{-| ホストがIPアドレスかどうかを判定する [from http-conduit]
+
+>>> isIpAddress "www.example.com"
+False
+>>> isIpAddress "127.0.0.1"
+True
+-}
 isIpAddress :: Ascii -> Bool
 isIpAddress a = case strs of
   Just strs' -> helper strs'
@@ -34,6 +43,20 @@ isIpAddress a = case strs of
         helper l = length l == 4 && all helper2 l
         helper2 v = (read v :: Int) >= 0 && (read v :: Int) < 256
 
+
+{-| ホスト名から、ドメイン名の列を生成する
+
+>>> splitDomains "www.example.com"
+[".com",".example.com","www.example.com"]
+>>> splitDomains ".example.com"
+[".com",".example.com"]
+>>> splitDomains "w.example.com"
+[".com",".example.com","w.example.com"]
+>>> splitDomains "com"
+["com"]
+>>> splitDomains ""
+[]
+-}
 splitDomains :: Ascii -> [Ascii]
 splitDomains host
   | isIpAddress host = [host]
@@ -41,12 +64,24 @@ splitDomains host
 		           | otherwise = f (BS.dropWhile (/= '.') $ BS.tail x) (x:ys)
                  in f host []
 
-{- from http-conduit -}
+{-|  [from http-conduit] 
+
+>>> pathMatches "/foo" "/foo"
+True
+>>> pathMatches "/foo" "/bar/baz"
+False
+>>> pathMatches "/bar/baz" "/"
+True
+>>> pathMatches "/bar/baz" "/bar"
+True
+>>> pathMatches "/bar/baz" "/bar/foo"
+False
+-}
 pathMatches :: Ascii -> Ascii -> Bool
 pathMatches requestPath cookiePath
   | cookiePath == requestPath = True
-  | cookiePath `BS.isPrefixOf` requestPath && BS.singleton (BS.last cookiePath) == U.fromString "/" = True
-  | cookiePath `BS.isPrefixOf` requestPath && BS.singleton (BS.head remainder) == U.fromString "/" = True
+  | cookiePath `BS.isPrefixOf` requestPath && BS.singleton (BS.last cookiePath) == "/" = True
+  | cookiePath `BS.isPrefixOf` requestPath && BS.singleton (BS.head remainder) == "/" = True
   | otherwise = False
   where remainder = BS.drop (BS.length cookiePath) requestPath
 
