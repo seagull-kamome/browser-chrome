@@ -3,7 +3,10 @@
 
 doctest --optghc=-XOverloadedStrings
 -}
-module Web.Browser.Chrome.Cookie (loadCookies) where
+module Web.Browser.Chrome.Cookie (
+  loadCookies,
+  module Web.Browser.Internal,
+  ) where
 
 import qualified Data.ByteString.UTF8 as U
 import qualified Data.ByteString.Char8 as BS
@@ -13,18 +16,24 @@ import Data.Time.Calendar (fromGregorian)
 import qualified Database.SQLite3 as SQL
 import Control.Applicative
 import Control.Monad (when)
+import Control.Monad.Trans (liftIO)
+import qualified Control.Monad.Trans.Resource as R
 import Control.Exception (bracket)
+
+import qualified Data.Conduit as C
+import qualified Data.Conduit.List as C
 import qualified Network.HTTP.Conduit as C
+
 import Network.HTTP.Types (Ascii)
 import Text.Regex (mkRegex, matchRegex)
 import System.Directory (getHomeDirectory,doesFileExist)
 import System.FilePath ((</>))
 
 import Web.Browser.Internal
+import Web.Browser.Chrome.Utils (pathToProfileDir)
+import Database.SQLite3.Conduit (stmtSource)
 
-pathToCookieDB :: FilePath -> FilePath
-pathToCookieDB profile = ".config" </> "google-chrome" </> profile </> "Cookies"
---pathToCookieDB profile = "Local Settings" </> "Application Data" </> "Google" </> "Chrome" </> "User Data" </> profile </> "Cookies"
+
 
 {-| ホストがIPアドレスかどうかを判定する [from http-conduit]
 
@@ -87,6 +96,36 @@ pathMatches requestPath cookiePath
 
 
 
+queryCookies :: R.MonadResource m => String -> String -> [SQL.SQLData] -> C.Source m C.Cookie
+queryCookies profile sql binds = flip C.PipeM (return ()) $ do
+  dbpath <-  (</> pathToProfileDir profile </> "Cookies") <$> liftIO getHomeDirectory
+  exists <- liftIO $ doesFileExist dbpath
+  when (not exists) $ error $ "No database found:" ++ dbpath
+  (dbkey, db) <- R.allocate (SQL.open dbpath) SQL.close
+  return $ C.PipeM (return $ stmtSource db sql binds) (R.release dbkey)
+      C.$= C.map (\ [ sqlUtc -> cookie_creation_time,
+                      sqlText -> cookie_domain,
+                      sqlText -> cookie_name,
+                      sqlText -> cookie_value,
+                      sqlText -> cookie_path,
+                      sqlUtc -> cookie_expiry_time,
+                      sqlBool -> cookie_secure_only,
+                      sqlBool -> cookie_http_only,
+                      sqlUtc -> cookie_last_access_time,
+                      _,
+                      sqlBool -> cookie_persistent ] -> C.Cookie {cookie_host_only=False, ..})
+  where
+    sqlText (SQL.SQLText x) = BS.pack x
+    sqlText _ = error "Column type mismatch."
+    sqlUtc (SQL.SQLInteger x) = addUTCTime (fromIntegral $ div x 1000000) (UTCTime (fromGregorian 1601 1 1) (fromInteger 0))
+    sqlUtc _ = error "Column type mismatch."
+    sqlBool (SQL.SQLInteger x) = if x == 0 then False else True
+    sqlBool _ = error "Column type mismatch."
+
+
+
+
+
 {-
 CREATE TABLE cookies (
   creation_utc INTEGER NOT NULL UNIQUE PRIMARY KEY,
@@ -100,50 +139,24 @@ CREATE TABLE cookies (
   last_access_utc INTEGER NOT NULL,
   has_expires INTEGER DEFAULT 1,
   persistent INTEGER DEFAULT 1
-  );Local Settings\Application Data\Google\Chrome\User Data\Default
+  );
 -}
-loadCookies :: String -> CookieLoader IO
-loadCookies profile hostname path isSecure isHttpApi = do
-  dbpath <-  (</> pathToCookieDB profile) <$> getHomeDirectory
-  exists <- doesFileExist dbpath
-  when (not exists) $ error $ "No database found:" ++ dbpath
-  bracket
-    (SQL.open dbpath)
-    SQL.close
-    (\db ->
-        bracket
-          (SQL.prepare db sql)
-	  SQL.finalize
-	  $ (\stmt -> SQL.bind stmt (map (SQL.SQLText . BS.unpack) pat) >> SQL.step stmt >>= go stmt []) )
+loadCookies :: C.MonadResource m => String -> CookieLoader m
+loadCookies profile hostname path isSecure isHttpApi =
+  queryCookies profile sql pat C.$= C.filter (pathMatches path . C.cookie_path)
   where
-    pat = splitDomains hostname
+    pat = map (SQL.SQLText . BS.unpack) $ splitDomains hostname
     sql = "select * from cookies where "
           ++ (if isSecure then "" else "secure = 0 and ")
 	  ++ (if isHttpApi then "" else "httponly = 0 and ")
 	  ++ (concat $ intersperse " or " $ replicate (length pat) "host_key=?")
 	  ++ " order by expires_utc desc"
-    go _ xs SQL.Done = return xs
-    go stmt xs SQL.Row  =  do
-      [ sqlUtc -> cookie_creation_time,
-        sqlText -> cookie_domain,
-        sqlText -> cookie_name,
-        sqlText -> cookie_value,
-        sqlText -> cookie_path,
-        sqlUtc -> cookie_expiry_time,
-        sqlBool -> cookie_secure_only,
-        sqlBool -> cookie_http_only,
-        sqlUtc -> cookie_last_access_time,
-        _,
-        sqlBool -> cookie_persistent ] <- SQL.columns stmt
-      SQL.step stmt >>= if pathMatches path cookie_path
-	                  then go stmt (C.Cookie {cookie_host_only=False, ..}:xs) 
-                          else go stmt xs 
-    sqlText (SQL.SQLText x) = BS.pack x
-    sqlText _ = error "Column type mismatch."
-    sqlUtc (SQL.SQLInteger x) = addUTCTime (fromIntegral $ div x 1000000) (UTCTime (fromGregorian 1601 1 1) (fromInteger 0))
-    sqlUtc _ = error "Column type mismatch."
-    sqlBool (SQL.SQLInteger x) = if x == 0 then False else True
-    sqlBool _ = error "Column type mismatch."
 
+
+
+{-|
+ -}
+loadAllCookies :: C.MonadResource m => String -> C.Source m C.Cookie
+loadAllCookies profile = queryCookies profile "select * from cookies" []
 
 

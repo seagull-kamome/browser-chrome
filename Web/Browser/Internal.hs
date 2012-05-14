@@ -2,6 +2,7 @@
 -}
 module Web.Browser.Internal (Request, CookieLoader) where
 
+import Data.Conduit (Source)
 import Network.HTTP.Conduit (Cookie(..))
 import Network.HTTP.Types (Ascii)
 
@@ -16,7 +17,7 @@ type CookieLoader m
     -> Ascii      -- Path to resource
     -> Bool       -- Is secure access?
     -> Bool       -- Is http access?
-    -> m [Cookie]
+    -> Source m Cookie
 
 
 
