@@ -26,12 +26,12 @@ import qualified Network.HTTP.Conduit as C
 
 import Network.HTTP.Types (Ascii)
 import Text.Regex (mkRegex, matchRegex)
-import System.Directory (getHomeDirectory,doesFileExist)
+import System.Directory (doesFileExist)
 import System.FilePath ((</>))
 
 import Web.Browser.Internal
 import Web.Browser.Chrome.Utils (pathToProfileDir)
-import Database.SQLite3.Conduit (stmtSource)
+import Database.SQLite3.Conduit (withSQLite3, stmtSource)
 
 
 
@@ -98,22 +98,20 @@ pathMatches requestPath cookiePath
 
 queryCookies :: R.MonadResource m => String -> String -> [SQL.SQLData] -> C.Source m C.Cookie
 queryCookies profile sql binds = flip C.PipeM (return ()) $ do
-  dbpath <-  (</> pathToProfileDir profile </> "Cookies") <$> liftIO getHomeDirectory
-  exists <- liftIO $ doesFileExist dbpath
-  when (not exists) $ error $ "No database found:" ++ dbpath
-  (dbkey, db) <- R.allocate (SQL.open dbpath) SQL.close
-  return $ C.PipeM (return $ stmtSource db sql binds) (R.release dbkey)
-      C.$= C.map (\ [ sqlUtc -> cookie_creation_time,
-                      sqlText -> cookie_domain,
-                      sqlText -> cookie_name,
-                      sqlText -> cookie_value,
-                      sqlText -> cookie_path,
-                      sqlUtc -> cookie_expiry_time,
-                      sqlBool -> cookie_secure_only,
-                      sqlBool -> cookie_http_only,
-                      sqlUtc -> cookie_last_access_time,
-                      _,
-                      sqlBool -> cookie_persistent ] -> C.Cookie {cookie_host_only=False, ..})
+  dbpath <-  (</> "Cookies") <$> liftIO (pathToProfileDir profile)
+  withSQLite3 dbpath $ (\db -> do
+    return $ stmtSource db sql binds
+        C.$= C.map (\ [ sqlUtc -> cookie_creation_time,
+                        sqlText -> cookie_domain,
+                        sqlText -> cookie_name,
+                        sqlText -> cookie_value,
+                        sqlText -> cookie_path,
+                        sqlUtc -> cookie_expiry_time,
+                        sqlBool -> cookie_secure_only,
+                        sqlBool -> cookie_http_only,
+                        sqlUtc -> cookie_last_access_time,
+                        _,
+                        sqlBool -> cookie_persistent ] -> C.Cookie {cookie_host_only=False, ..}))
   where
     sqlText (SQL.SQLText x) = BS.pack x
     sqlText _ = error "Column type mismatch."

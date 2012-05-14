@@ -9,11 +9,22 @@ import Control.Monad.Trans.Resource
 import Control.Monad.Reader
 import qualified Data.Conduit as C
 import Database.SQLite3
+import System.Directory (doesFileExist)
 
-type SQLite3 = ReaderT Database (ResourceT IO)
+type SQLite3 m = ReaderT Database m
 
-runSQLite3 :: Database -> SQLite3 a -> ResourceT IO a
-runSQLite3 db reader = runReaderT reader db
+withSQLite3 :: (MonadResource m) => FilePath -> (Database -> m a) -> m a
+withSQLite3 dbpath m = do
+  exists <- liftIO $ doesFileExist dbpath
+  when (not exists) $ error $ "No database found:" ++ dbpath
+  (dbkey, db) <- allocate (open dbpath) close
+  ret <- m db
+  release dbkey
+  return ret
+
+
+runSQLite3 :: MonadResource m => FilePath -> SQLite3 m a -> m a
+runSQLite3 dbpath reader = withSQLite3 dbpath (runReaderT reader)
 
 
 stmtSource :: MonadResource m => Database -> String -> [SQLData] -> C.Source m [SQLData]
@@ -24,7 +35,7 @@ stmtSource db sql bindvar = flip C.PipeM (return ()) $ do
   let go = flip C.PipeM fin $ do
                                 res <- liftIO $ step stmt
                                 case res of
-                                  Done -> pure $ C.Done Nothing ()
+                                  Done -> return (C.Done Nothing ())
                                   Row -> C.HaveOutput go fin <$> liftIO (columns stmt)
   return go
 
